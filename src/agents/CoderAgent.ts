@@ -22,14 +22,27 @@ Architecture Plan:
 Existing Files:
 {files}
 
-Write the code to implement the app.
+Write the code to implement the app COMPLETELY.
+
 Return ONLY a valid JSON object: {{ "filename.js": "code content", ... }}
 
 STRICT RULES:
-- No markdown fences, no explanations
-- Escape newlines as \\n inside strings
-- Use CommonJS (require), not ES modules
-- Include a package.json with dependencies
+- Return valid JSON ONLY. No text before or after.
+- Every file value MUST be a STRING containing the file's code.
+- Use REAL newlines inside the JSON string. Do NOT write \\n as text.
+- Do NOT double-escape.
+- Use CommonJS (require), not ES modules.
+- You MUST generate EXACTLY these files — no more, no less:
+    1. "index.js" — the Express server with all endpoints
+    2. "package.json" — the npm manifest
+- The package.json MUST contain: {{"name":"ai-app","version":"1.0.0","main":"index.js","scripts":{{"start":"node index.js"}},"dependencies":{{"express":"^4.18.2","body-parser":"^1.20.2"}}}}
+- Implement EVERY endpoint in the architecture plan. Do not simplify.
+- Routes must return proper JSON via res.json(), not res.send().
+- Include error handling for invalid input (return 400 status).
+- Failure to include BOTH files will break the build.
+
+Return JSON in this exact shape:
+{{"index.js": "...", "package.json": "..."}}
 `);
 
     const chain = prompt.pipe(fastLLM);

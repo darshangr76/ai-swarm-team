@@ -4,30 +4,73 @@ import { CoderAgent } from "./agents/CoderAgent";
 import { FixerAgent } from "./agents/FixerAgent";
 import { sleep } from "./utils/llm";
 import * as dotenv from "dotenv";
+import * as fs from "fs";
+import * as path from "path";
+import { execSync } from "child_process";
 
 dotenv.config();
 
-const runSandbox = async (files: Record<string, string>): Promise<string> => {
-  console.log("Sandbox: running simulated tests...");
-  await sleep(1200);
+const OUTPUT_DIR = path.join(process.cwd(), "generated-app");
 
-  const hasServer = Object.keys(files).some(
-    (f) => f.includes("server") || f.includes("index") || f.includes("app")
-  );
-  if (!hasServer) {
-    return "ERROR: no server file generated. Expected server.js or index.js.";
+function deEscape(raw: string): string {
+  if (raw.includes("\\n") && !raw.includes("\n")) {
+    return raw
+      .replace(/\\\\n/g, "\n")
+      .replace(/\\n/g, "\n")
+      .replace(/\\\\t/g, "\t")
+      .replace(/\\t/g, "\t")
+      .replace(/\\\\"/g, '"')
+      .replace(/\\"/g, '"');
   }
-  if (Math.random() < 0.4) {
-    return "ERROR: Cannot find module 'express'. Missing in package.json.";
+  return raw;
+}
+
+const writeFiles = (files: Record<string, string>) => {
+  if (fs.existsSync(OUTPUT_DIR)) {
+    fs.rmSync(OUTPUT_DIR, { recursive: true, force: true });
   }
-  return "SUCCESS: All tests passed.";
+  fs.mkdirSync(OUTPUT_DIR, { recursive: true });
+
+  for (const [name, content] of Object.entries(files)) {
+    let asString: string;
+    if (typeof content === "string") {
+      asString = content;
+    } else {
+      asString = JSON.stringify(content, null, 2);
+      console.log(`WARN: File "${name}" was not a string - stringified.`);
+    }
+    asString = deEscape(asString);
+    const filePath = path.join(OUTPUT_DIR, name);
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, asString);
+    console.log(
+      `WROTE ${name} (${asString.length} chars, ${asString.split("\n").length} lines)`
+    );
+  }
 };
 
-async function runSwarm(requirement: string) {
+export type SwarmEvent = {
+  type: "log" | "status" | "file" | "complete";
+  data: any;
+};
+
+export async function runSwarm(
+  requirement: string,
+  emit: (event: SwarmEvent) => void = () => {}
+): Promise<{ status: string; files: Record<string, string>; logs: string[] }> {
   const bb = new SwarmBlackboard(requirement);
   const planner = new PlannerAgent();
   const coder = new CoderAgent();
   const fixer = new FixerAgent();
+
+  const originalLog = bb.log.bind(bb);
+  bb.log = (msg: string) => {
+    originalLog(msg);
+    emit({
+      type: "log",
+      data: { message: msg, timestamp: new Date().toISOString() },
+    });
+  };
 
   bb.log(`Swarm starting: "${requirement}"`);
 
@@ -37,7 +80,7 @@ async function runSwarm(requirement: string) {
   while (bb.getState().status !== "DONE" && iter < MAX) {
     iter++;
     const s = bb.getState();
-    console.log(`\n--- Iteration ${iter} | Status: ${s.status} ---`);
+    emit({ type: "status", data: { status: s.status, iteration: iter } });
 
     try {
       switch (s.status) {
@@ -50,20 +93,51 @@ async function runSwarm(requirement: string) {
         case "FIXING":
           await fixer.run(bb);
           break;
+        
         case "TESTING": {
-          const result = await runSandbox(s.files);
-          if (result.startsWith("SUCCESS")) {
-            bb.updateState({ status: "DONE", testResults: result });
-          } else {
-            bb.updateState({ status: "FIXING", errors: [result] });
-          }
-          break;
-        }
+  writeFiles(s.files);
+  Object.entries(s.files).forEach(([name, content]) => {
+    emit({
+      type: "file",
+      data: { name, content, lines: content.split("\n").length },
+    });
+  });
+
+  const hasServer = Object.keys(s.files).some(
+    (f) => f.includes("server") || f.includes("index") || f.includes("app")
+  );
+
+  let result: string;
+  if (!hasServer) {
+    result = "ERROR: no server file generated.";
+  } else {
+    try {
+      console.log("Sandbox: running npm install on generated code...");
+      execSync("npm install --silent --no-audit --no-fund", {
+        cwd: OUTPUT_DIR,
+        stdio: "pipe",
+        timeout: 90000,
+      });
+      result = "SUCCESS: Dependencies installed and files written.";
+    } catch (e) {
+      const err = e as Error & { stderr?: Buffer };
+      const msg = err.stderr?.toString() || err.message;
+      result = `ERROR: npm install failed -> ${msg.substring(0, 300)}`;
+    }
+  }
+
+  if (result.startsWith("SUCCESS")) {
+    bb.updateState({ status: "DONE", testResults: result });
+  } else {
+    bb.updateState({ status: "FIXING", errors: [result] });
+  }
+  break;
+}
         default:
           bb.updateState({ status: "DONE" });
       }
     } catch (err) {
-      console.error("Agent crashed:", err);
+      bb.log(`Agent crashed: ${(err as Error).message}`);
       bb.updateState({ status: "DONE" });
     }
 
@@ -71,16 +145,29 @@ async function runSwarm(requirement: string) {
   }
 
   const final = bb.getState();
-  console.log("\n==========================================");
-  console.log(`SWARM COMPLETE — ${final.status}`);
-  console.log("==========================================");
-  console.log("\nFiles generated:");
-  Object.keys(final.files).forEach((f) => {
-    console.log(`\n--- ${f} ---`);
-    console.log(final.files[f].substring(0, 400));
+  emit({
+    type: "complete",
+    data: { status: final.status, files: Object.keys(final.files) },
   });
+
+  return {
+    status: final.status,
+    files: final.files,
+    logs: final.logs,
+  };
 }
 
-runSwarm(
-  "Build a Node.js REST API for a todo list with GET /todos and POST /todos endpoints using Express and an in-memory array."
-);
+if (require.main === module) {
+  runSwarm(
+    "Build a Node.js REST API for a todo list with GET /todos, POST /todos, DELETE /todos/:id endpoints using Express and an in-memory array."
+  ).then((result) => {
+    console.log("\n==========================================");
+    console.log(`SWARM COMPLETE - ${result.status}`);
+    console.log("==========================================");
+    console.log("\nFiles generated:");
+    Object.keys(result.files).forEach((f) => {
+      console.log(`\n--- ${f} ---`);
+      console.log(result.files[f]);
+    });
+  });
+}

@@ -23,9 +23,13 @@ Test Errors:
 {errors}
 
 Fix the code. Return ONLY a JSON object of files that need to change:
-{{ "filename.js": "updated code content" }}
+{{ "filename.js": "FULL FILE CONTENT AS A STRING" }}
 
-No markdown, no explanation.
+STRICT RULES:
+- Every value MUST be a complete file as a string.
+- Do NOT return fragments like {{ "body-parser": "^1.19.0" }}.
+- Do NOT wrap in markdown.
+- If a file is fine, omit it entirely.
 `);
 
     const chain = prompt.pipe(fastLLM);
@@ -36,12 +40,23 @@ No markdown, no explanation.
 
     try {
       const patched = JSON.parse(cleanJson(response.content as string));
+
+      // Validate: every value must be a string
+      const validPatches: Record<string, string> = {};
+      for (const [name, content] of Object.entries(patched)) {
+        if (typeof content === "string") {
+          validPatches[name] = content;
+        } else {
+          console.log(`⚠️  Fixer: skipping non-string file "${name}"`);
+        }
+      }
+
       blackboard.updateState({
-        files: { ...state.files, ...patched },
+        files: { ...state.files, ...validPatches },
         status: "TESTING",
         errors: [],
       });
-      blackboard.log(`Fixer: patched ${Object.keys(patched).length} files.`);
+      blackboard.log(`Fixer: patched ${Object.keys(validPatches).length} files.`);
     } catch (e) {
       blackboard.log("Fixer: could not parse patch. Halting.");
       blackboard.updateState({ status: "DONE" });
